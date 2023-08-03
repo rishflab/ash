@@ -87,7 +87,7 @@ fn main() {
                     .unwrap()
             })
             .collect();
-        
+
         let mut instance_buffer_data = vec![];
         for j in 0..INSTANCE_COUNT_Y {
             for i in 0..INSTANCE_COUNT_X {
@@ -254,6 +254,76 @@ fn main() {
         base.device
             .bind_buffer_memory(vertex_input_buffer, vertex_input_buffer_memory, 0)
             .unwrap();
+
+        
+        let mut indirect_draw_command_data = vec![];
+        for m in 0..1 {    
+            let draw_indirect_command = vk::DrawIndexedIndirectCommand{
+                index_count: index_buffer_data.len() as u32,
+                instance_count: instance_buffer_data.len() as u32,
+                first_index: 0,
+                vertex_offset: 0,
+                first_instance: (m * std::mem::size_of::<Vertex>()) as u32,
+            };
+            indirect_draw_command_data.push(draw_indirect_command);
+        }
+
+        let indirect_buffer_info = vk::BufferCreateInfo {
+            size: (indirect_draw_command_data.len() * std::mem::size_of::<Vertex>()) as u64,
+            usage: vk::BufferUsageFlags::INDIRECT_BUFFER,
+            sharing_mode: vk::SharingMode::EXCLUSIVE,
+            ..Default::default()
+        };
+
+        let indirect_buffer = base
+            .device
+            .create_buffer(&indirect_buffer_info, None)
+            .unwrap();
+
+        let indirect_buffer_memory_req = base
+            .device
+            .get_buffer_memory_requirements(indirect_buffer);
+
+        let indirect_buffer_memory_index = find_memorytype_index(
+            &indirect_buffer_memory_req,
+            &base.device_memory_properties,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        )
+        .expect("Unable to find suitable memorytype for the vertex buffer.");
+
+        let indirect_buffer_allocate_info = vk::MemoryAllocateInfo {
+            allocation_size: indirect_buffer_memory_req.size,
+            memory_type_index: indirect_buffer_memory_index,
+            ..Default::default()
+        };
+
+        let indirect_buffer_memory = base
+            .device
+            .allocate_memory(&indirect_buffer_allocate_info, None)
+            .unwrap();
+
+        let indirect_ptr = base
+            .device
+            .map_memory(
+                indirect_buffer_memory,
+                0,
+                indirect_buffer_memory_req.size,
+                vk::MemoryMapFlags::empty(),
+            )
+            .unwrap();
+
+        let mut indirect_align = Align::new(
+            indirect_ptr,
+            align_of::<Vertex>() as u64,
+            indirect_buffer_memory_req.size,
+        );
+        indirect_align.copy_from_slice(&indirect_draw_command_data);
+        base.device.unmap_memory(indirect_buffer_memory);
+        base.device
+            .bind_buffer_memory(indirect_buffer, indirect_buffer_memory, 0)
+            .unwrap();
+
+        
         let mut vertex_spv_file = Cursor::new(&include_bytes!("../../shader/triangle/vert.spv")[..]);
         let mut frag_spv_file = Cursor::new(&include_bytes!("../../shader/triangle/frag.spv")[..]);
 
@@ -494,14 +564,23 @@ fn main() {
                         0,
                         vk::IndexType::UINT32,
                     );
-                    device.cmd_draw_indexed(
-                        draw_command_buffer,
-                        index_buffer_data.len() as u32,
-                        INSTANCE_COUNT_X as u32 * INSTANCE_COUNT_Y as u32,
-                        0,
-                        0,
-                        0,
+
+                    // device.cmd_draw_indexed(
+                    //     draw_command_buffer,
+                    //     index_buffer_data.len() as u32,
+                    //     INSTANCE_COUNT_X as u32 * INSTANCE_COUNT_Y as u32,
+                    //     0,
+                    //     0,
+                    //     0,
+                    // );
+
+                    device.cmd_draw_indexed_indirect(draw_command_buffer, 
+                        indirect_buffer, 
+                        0, 
+                        1, 
+                        std::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u32
                     );
+
                     // Or draw without the index buffer
                     // device.cmd_draw(draw_command_buffer, 3, 1, 0, 0);
                     device.cmd_end_render_pass(draw_command_buffer);
