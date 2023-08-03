@@ -7,6 +7,10 @@ use std::io::Cursor;
 use std::mem;
 use std::mem::align_of;
 
+const INSTANCE_COUNT_X: u64 = 16;
+const INSTANCE_COUNT_Y: u64 = 9;
+const VERTEX_COUNT: u64 = 500;
+
 #[derive(Clone, Debug, Copy)]
 struct Vertex {
     pos: [f32; 4],
@@ -15,7 +19,7 @@ struct Vertex {
 
 fn main() {
     unsafe {
-        let base = ExampleBase::new(1920, 1080);
+        let base = ExampleBase::new(1280, 720);
         let renderpass_attachments = [
             vk::AttachmentDescription {
                 format: base.surface_format.format,
@@ -83,10 +87,78 @@ fn main() {
                     .unwrap()
             })
             .collect();
+        
+        let mut instance_buffer_data = vec![];
+        for j in 0..INSTANCE_COUNT_Y {
+            for i in 0..INSTANCE_COUNT_X {
+                let x_incr = 1.0/INSTANCE_COUNT_X as f32;
+                let y_incr = 1.0/INSTANCE_COUNT_Y as f32;
+                let x_offset = -1.0 + x_incr + 2.0 * x_incr * i as f32;
+                let y_offset = -1.0 + y_incr + 2.0 * y_incr * j as f32;
+                instance_buffer_data.push(Vertex {
+                    pos: [x_offset, y_offset, 0.0, 1.0],
+                    color: [x_incr, y_incr, 0.0, 1.0],
+                });
+            }
+        }
 
-        let index_buffer_data = [0u32, 1, 2];
+        let instance_buffer_info = vk::BufferCreateInfo::builder()
+            .size(INSTANCE_COUNT_X * INSTANCE_COUNT_Y * std::mem::size_of::<Vertex>() as u64)
+            .usage(vk::BufferUsageFlags::VERTEX_BUFFER)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+
+        let instance_input_buffer = base
+            .device
+            .create_buffer(&instance_buffer_info, None)
+            .unwrap();
+
+        let instance_input_buffer_memory_req = base
+            .device
+            .get_buffer_memory_requirements(instance_input_buffer);
+
+        let instance_input_buffer_memory_index = find_memorytype_index(
+            &instance_input_buffer_memory_req,
+            &base.device_memory_properties,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        )
+        .expect("Unable to find suitable memorytype for the instance buffer.");
+
+        let instance_buffer_allocate_info = vk::MemoryAllocateInfo {
+            allocation_size: instance_input_buffer_memory_req.size,
+            memory_type_index: instance_input_buffer_memory_index,
+            ..Default::default()
+        };
+
+        let instance_input_buffer_memory = base
+            .device
+            .allocate_memory(&instance_buffer_allocate_info, None)
+            .unwrap();
+
+        let instance_ptr = base
+            .device
+            .map_memory(
+                instance_input_buffer_memory,
+                0,
+                instance_input_buffer_memory_req.size,
+                vk::MemoryMapFlags::empty(),
+            )
+            .unwrap();
+
+        let mut instance_align = Align::new(
+            instance_ptr,
+            align_of::<Vertex>() as u64,
+            instance_input_buffer_memory_req.size,
+        );
+        instance_align.copy_from_slice(&instance_buffer_data);
+        base.device.unmap_memory(instance_input_buffer_memory);
+        base.device
+            .bind_buffer_memory(instance_input_buffer, instance_input_buffer_memory, 0)
+            .unwrap();
+
+        let edge = 1.2/VERTEX_COUNT as f32; 
+        let (vertices, index_buffer_data) = gen_plane(edge, VERTEX_COUNT as u32, VERTEX_COUNT as u32);
         let index_buffer_info = vk::BufferCreateInfo::builder()
-            .size(std::mem::size_of_val(&index_buffer_data) as u64)
+            .size((std::mem::size_of::<u32>() * index_buffer_data.len()) as u64)
             .usage(vk::BufferUsageFlags::INDEX_BUFFER)
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
@@ -129,7 +201,7 @@ fn main() {
             .unwrap();
 
         let vertex_input_buffer_info = vk::BufferCreateInfo {
-            size: 3 * std::mem::size_of::<Vertex>() as u64,
+            size: (vertices.len() * std::mem::size_of::<Vertex>()) as u64,
             usage: vk::BufferUsageFlags::VERTEX_BUFFER,
             sharing_mode: vk::SharingMode::EXCLUSIVE,
             ..Default::default()
@@ -162,21 +234,6 @@ fn main() {
             .allocate_memory(&vertex_buffer_allocate_info, None)
             .unwrap();
 
-        let vertices = [
-            Vertex {
-                pos: [-1.0, 1.0, 0.0, 1.0],
-                color: [0.0, 1.0, 0.0, 1.0],
-            },
-            Vertex {
-                pos: [1.0, 1.0, 0.0, 1.0],
-                color: [0.0, 0.0, 1.0, 1.0],
-            },
-            Vertex {
-                pos: [0.0, -1.0, 0.0, 1.0],
-                color: [1.0, 0.0, 0.0, 1.0],
-            },
-        ];
-
         let vert_ptr = base
             .device
             .map_memory(
@@ -197,8 +254,7 @@ fn main() {
         base.device
             .bind_buffer_memory(vertex_input_buffer, vertex_input_buffer_memory, 0)
             .unwrap();
-        let mut vertex_spv_file =
-            Cursor::new(&include_bytes!("../../shader/triangle/vert.spv")[..]);
+        let mut vertex_spv_file = Cursor::new(&include_bytes!("../../shader/triangle/vert.spv")[..]);
         let mut frag_spv_file = Cursor::new(&include_bytes!("../../shader/triangle/frag.spv")[..]);
 
         let vertex_code =
@@ -242,11 +298,18 @@ fn main() {
                 ..Default::default()
             },
         ];
-        let vertex_input_binding_descriptions = [vk::VertexInputBindingDescription {
-            binding: 0,
-            stride: mem::size_of::<Vertex>() as u32,
-            input_rate: vk::VertexInputRate::VERTEX,
-        }];
+        let vertex_input_binding_descriptions = [
+            vk::VertexInputBindingDescription {
+                binding: 0,
+                stride: mem::size_of::<Vertex>() as u32,
+                input_rate: vk::VertexInputRate::VERTEX,
+            },
+            vk::VertexInputBindingDescription {
+                binding: 1,
+                stride: mem::size_of::<Vertex>() as u32,
+                input_rate: vk::VertexInputRate::INSTANCE,
+            },
+        ];
         let vertex_input_attribute_descriptions = [
             vk::VertexInputAttributeDescription {
                 location: 0,
@@ -257,6 +320,18 @@ fn main() {
             vk::VertexInputAttributeDescription {
                 location: 1,
                 binding: 0,
+                format: vk::Format::R32G32B32A32_SFLOAT,
+                offset: offset_of!(Vertex, color) as u32,
+            },
+            vk::VertexInputAttributeDescription {
+                location: 2,
+                binding: 1,
+                format: vk::Format::R32G32B32A32_SFLOAT,
+                offset: offset_of!(Vertex, pos) as u32,
+            },
+            vk::VertexInputAttributeDescription {
+                location: 3,
+                binding: 1,
                 format: vk::Format::R32G32B32A32_SFLOAT,
                 offset: offset_of!(Vertex, color) as u32,
             },
@@ -407,6 +482,12 @@ fn main() {
                         &[vertex_input_buffer],
                         &[0],
                     );
+                    device.cmd_bind_vertex_buffers(
+                        draw_command_buffer,
+                        1,
+                        &[instance_input_buffer],
+                        &[0],
+                    );
                     device.cmd_bind_index_buffer(
                         draw_command_buffer,
                         index_buffer,
@@ -416,10 +497,10 @@ fn main() {
                     device.cmd_draw_indexed(
                         draw_command_buffer,
                         index_buffer_data.len() as u32,
-                        1,
+                        INSTANCE_COUNT_X as u32 * INSTANCE_COUNT_Y as u32,
                         0,
                         0,
-                        1,
+                        0,
                     );
                     // Or draw without the index buffer
                     // device.cmd_draw(draw_command_buffer, 3, 1, 0, 0);
@@ -457,5 +538,64 @@ fn main() {
             base.device.destroy_framebuffer(framebuffer, None);
         }
         base.device.destroy_render_pass(renderpass, None);
+    }
+}
+
+
+
+fn gen_plane(
+    triangle_edge: f32,
+    w: u32,
+    h: u32,
+) -> (Vec<Vertex>, Vec<u32>) {
+    use std::ops::Neg;
+
+    let mut vertices = vec![];
+
+    let start_x = triangle_edge.neg() * w as f32 / 2.0;
+    let start_y = triangle_edge.neg() * h as f32 / 2.0;
+
+    for j in 0..h + 1 {
+        for i in 0..w + 1 {
+            let x = start_x + i as f32 * triangle_edge;
+            let y = start_y + j as f32 * triangle_edge;
+            vertices.push(Vertex {
+                pos: [x, y, 0.0, 1.0],
+                color: [x , y, (x+y)/2.0, 1.0],
+            });
+        }
+    }
+
+    let mut indices = vec![];
+
+    for j in 0..h {
+        for i in 0..w {
+            let row = j * (w + 1);
+            let next_row = (j + 1) * (w + 1);
+            indices.push(row + i);
+            indices.push(row + i + 1);
+            indices.push(next_row + i + 1);
+            indices.push(row + i);
+            indices.push(next_row + i + 1);
+            indices.push(next_row + i);
+        }
+    }
+
+    round_flat_plane_vertices(&mut vertices);
+
+    (vertices, indices)
+}
+
+
+fn round_flat_plane_vertices(vertices: &mut Vec<Vertex>) {
+    for Vertex {
+        pos: p,
+        ..
+    } in vertices.iter_mut()
+    {
+        //round the vertices to 2 decimal places to reduce leaks/overlap in mesh
+        p[0] = (p[0] * 100.0).round() / 100.0;
+        p[1] = (p[1] * 100.0).round() / 100.0;
+        p[2] = (p[2] * 100.0).round() / 100.0;
     }
 }
